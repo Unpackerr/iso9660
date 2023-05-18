@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -178,6 +179,7 @@ func (de *DirectoryEntry) UnmarshalBinary(data []byte) error {
 	identifierLen := data[32]
 	de.Identifier = string(data[33 : 33+identifierLen])
 
+	log.Printf("DEBUG: %b %q %q", de.FileFlags, de.Identifier, string(data))
 	// add padding if identifier length was even]
 	idPaddingLen := (identifierLen + 1) % 2
 	de.SystemUse = data[33+identifierLen+idPaddingLen : length]

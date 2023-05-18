@@ -82,6 +82,11 @@ func (f *File) IsDir() bool {
 	return f.de.FileFlags&dirFlagDir != 0
 }
 
+// HasMultiExtent is for 'testing' ISO data.
+func (f *File) HasMultiExtent() bool {
+	return f.de.FileFlags&dirFlagMultiExtent != 0
+}
+
 // ModTime returns the entry's recording time
 func (f *File) ModTime() time.Time {
 	return time.Time(f.de.RecordingDateTime)
