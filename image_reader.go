@@ -72,6 +72,12 @@ func (i *Image) Label() (string, error) {
 	return "", os.ErrNotExist
 }
 
+// extent describes a single contiguous region of data on the disc.
+type extent struct {
+	Location int32
+	Length   uint32
+}
+
 // File is a os.FileInfo-compatible wrapper around an ISO9660 directory entry
 type File struct {
 	ra        io.ReaderAt
@@ -79,6 +85,9 @@ type File struct {
 	children  []*File
 	isRootDir bool
 	susp      *SUSPMetadata
+	// extents holds all extents for multi-extent files (ECMA-119 9.1.6).
+	// For single-extent files this is nil and de.ExtentLocation/ExtentLength are used directly.
+	extents []extent
 }
 
 var _ os.FileInfo = &File{}
@@ -153,8 +162,16 @@ func (f *File) Name() string {
 	return fileIdentifier
 }
 
-// Size returns the size in bytes of the extent occupied by the file or directory
+// Size returns the size in bytes of the extent occupied by the file or directory.
+// For multi-extent files, this returns the total size across all extents.
 func (f *File) Size() int64 {
+	if len(f.extents) > 0 {
+		var total int64
+		for _, ext := range f.extents {
+			total += int64(ext.Length)
+		}
+		return total
+	}
 	return int64(f.de.ExtentLength)
 }
 
@@ -175,6 +192,11 @@ func (f *File) GetAllChildren() ([]*File, error) {
 	}
 
 	baseOffset := uint32(f.de.ExtentLocation) * sectorSize
+
+	// pendingExtents collects extents for a multi-extent file (ECMA-119 9.1.6).
+	// When we see directory records with the multi-extent flag set, we accumulate
+	// their extents here until we reach the final record (without the flag).
+	var pendingExtents []extent
 
 	buffer := make([]byte, sectorSize)
 	for bytesProcessed := uint32(0); bytesProcessed < uint32(f.de.ExtentLength); bytesProcessed += sectorSize {
@@ -230,10 +252,32 @@ func (f *File) GetAllChildren() ([]*File, error) {
 
 			i += entryLength
 
-			newFile := &File{ra: f.ra,
+			// Check for multi-extent flag (ECMA-119 9.1.6, bit 7 of FileFlags).
+			// When set, this directory record is not the final one for this file.
+			// Consecutive records should have their extents concatenated.
+			if newDE.FileFlags&dirFlagMultiExtent != 0 {
+				pendingExtents = append(pendingExtents, extent{
+					Location: newDE.ExtentLocation,
+					Length:   newDE.ExtentLength,
+				})
+				continue
+			}
+
+			newFile := &File{
+				ra:       f.ra,
 				de:       newDE,
 				children: nil,
 				susp:     f.susp.Clone(),
+			}
+
+			// If we accumulated multi-extent records, finalize them now.
+			if len(pendingExtents) > 0 {
+				pendingExtents = append(pendingExtents, extent{
+					Location: newDE.ExtentLocation,
+					Length:   newDE.ExtentLength,
+				})
+				newFile.extents = pendingExtents
+				pendingExtents = nil
 			}
 
 			f.children = append(f.children, newFile)
@@ -282,9 +326,20 @@ func (f *File) GetDotEntry() (*File, error) {
 
 // Reader returns a reader that allows to read the file's data.
 // If File is a directory, it returns nil.
+// For multi-extent files (ECMA-119 9.1.6), the returned reader
+// seamlessly reads across all extents.
 func (f *File) Reader() io.Reader {
 	if f.IsDir() {
 		return nil
+	}
+
+	if len(f.extents) > 1 {
+		readers := make([]io.Reader, len(f.extents))
+		for i, ext := range f.extents {
+			offset := int64(ext.Location) * int64(sectorSize)
+			readers[i] = io.NewSectionReader(f.ra, offset, int64(ext.Length))
+		}
+		return io.MultiReader(readers...)
 	}
 
 	baseOffset := int64(f.de.ExtentLocation) * int64(sectorSize)
