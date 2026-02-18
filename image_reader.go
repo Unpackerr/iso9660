@@ -1,11 +1,13 @@
 package iso9660
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // Image is a wrapper around an image file that allows reading its ISO9660 data
@@ -51,9 +53,18 @@ func (i *Image) readVolumes() error {
 	return nil
 }
 
-// RootDir returns the File structure corresponding to the root directory
-// of the first primary volume
+// RootDir returns the File structure corresponding to the root directory.
+// It prefers a Joliet supplementary volume descriptor (which provides full
+// Unicode filenames) over the primary volume descriptor.
 func (i *Image) RootDir() (*File, error) {
+	// Check for Joliet supplementary VD first.
+	for _, vd := range i.volumeDescriptors {
+		if vd.isJoliet() {
+			return &File{de: vd.Primary.RootDirectoryEntry, ra: i.ra, children: nil, isRootDir: true, joliet: true}, nil
+		}
+	}
+
+	// Fall back to primary VD.
 	for _, vd := range i.volumeDescriptors {
 		if vd.Type() == volumeTypePrimary {
 			return &File{de: vd.Primary.RootDirectoryEntry, ra: i.ra, children: nil, isRootDir: true}, nil
@@ -85,6 +96,7 @@ type File struct {
 	children  []*File
 	isRootDir bool
 	susp      *SUSPMetadata
+	joliet    bool
 	// extents holds all extents for multi-extent files (ECMA-119 9.1.6).
 	// For single-extent files this is nil and de.ExtentLocation/ExtentLength are used directly.
 	extents []extent
@@ -139,6 +151,15 @@ func (f *File) Name() string {
 		if name := f.de.SystemUseEntries.GetRockRidgeName(); name != "" {
 			return name
 		}
+	}
+
+	// Joliet names are already decoded to UTF-8; just strip any trailing ";1".
+	if f.joliet {
+		name := f.de.Identifier
+		if idx := strings.LastIndex(name, ";"); idx >= 0 {
+			name = name[:idx]
+		}
+		return name
 	}
 
 	if f.IsDir() {
@@ -224,6 +245,11 @@ func (f *File) GetAllChildren() ([]*File, error) {
 				return nil, err
 			}
 
+			// Decode Joliet UTF-16BE identifiers to UTF-8.
+			if f.joliet && len(newDE.Identifier) > 1 {
+				newDE.Identifier = decodeJolietIdentifier([]byte(newDE.Identifier))
+			}
+
 			// Is this a root directory '.' record?
 			if f.isRootDir && newDE.Identifier == string([]byte{0}) {
 				newDE.SystemUseEntries, _ = splitSystemUseEntries(newDE.SystemUse, f.ra)
@@ -273,6 +299,7 @@ func (f *File) GetAllChildren() ([]*File, error) {
 				de:       newDE,
 				children: nil,
 				susp:     f.susp.Clone(),
+				joliet:   f.joliet,
 			}
 
 			// If we accumulated multi-extent records, finalize them now.
@@ -349,4 +376,18 @@ func (f *File) Reader() io.Reader {
 
 	baseOffset := int64(f.de.ExtentLocation) * int64(sectorSize)
 	return io.NewSectionReader(f.ra, baseOffset, int64(f.de.ExtentLength))
+}
+
+// decodeJolietIdentifier decodes a UTF-16BE encoded Joliet identifier to UTF-8.
+func decodeJolietIdentifier(raw []byte) string {
+	if len(raw)%2 != 0 {
+		return string(raw)
+	}
+
+	u16 := make([]uint16, len(raw)/2)
+	for i := range u16 {
+		u16[i] = binary.BigEndian.Uint16(raw[2*i : 2*i+2])
+	}
+
+	return string(utf16.Decode(u16))
 }
