@@ -5,6 +5,7 @@ package iso9660
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
@@ -29,6 +30,10 @@ func TestImageReader(t *testing.T) {
 		assert.Equal(t, volumeTypePrimary, image.volumeDescriptors[0].Header.Type)
 		assert.Equal(t, volumeTypeTerminator, image.volumeDescriptors[1].Header.Type)
 	}
+
+	label, err := image.Label()
+	assert.NoError(t, err)
+	assert.Equal(t, "my-vol-id", label)
 
 	rootDir, err := image.RootDir()
 	assert.NoError(t, err)
@@ -141,7 +146,12 @@ func TestImageReaderSUSP(t *testing.T) {
 
 	children, err := rootDir.GetChildren()
 	assert.NoError(t, err)
-	assert.Len(t, children, 4)
+	assert.Len(t, children, 5)
+
+	// symlink
+	symlink := children[4]
+	assert.Equal(t, "this-is-a-symlink", symlink.Name())
+	assert.Equal(t, os.ModeSymlink, symlink.Mode()&os.ModeSymlink)
 
 	dir1 := children[1]
 	assert.Equal(t, "dir1", dir1.Name())
@@ -154,6 +164,7 @@ func TestImageReaderSUSP(t *testing.T) {
 	loremFile := dir1Children[0]
 	assert.Equal(t, "lorem_ipsum.txt", loremFile.Name())
 	assert.Equal(t, int64(446), loremFile.Size())
+	assert.Equal(t, fs.FileMode(0640), loremFile.Mode().Perm(), "expected mode %o, got %o", 0640, loremFile.Mode().Perm())
 	assert.NotNil(t, loremFile.susp)
 	assert.True(t, loremFile.susp.HasRockRidge)
 
