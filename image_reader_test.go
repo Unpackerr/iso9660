@@ -120,6 +120,64 @@ func TestImage(t *testing.T) {
 	assert.Error(t, os.ErrNotExist, err)
 }
 
+func TestImageReaderJoliet(t *testing.T) {
+	f, err := os.Open("fixtures/test_joliet.iso")
+	assert.NoError(t, err)
+	defer f.Close() // nolint: errcheck
+
+	image, err := OpenImage(f)
+	assert.NoError(t, err)
+
+	// Should have primary + supplementary (Joliet) + terminator VDs
+	hasJoliet := false
+	for _, vd := range image.volumeDescriptors {
+		if vd.isJoliet() {
+			hasJoliet = true
+			break
+		}
+	}
+	assert.True(t, hasJoliet, "expected Joliet supplementary VD")
+
+	// RootDir should prefer Joliet
+	rootDir, err := image.RootDir()
+	assert.NoError(t, err)
+	assert.True(t, rootDir.IsDir())
+	assert.True(t, rootDir.joliet, "root should be from Joliet VD")
+
+	children, err := rootDir.GetChildren()
+	assert.NoError(t, err)
+
+	// Collect child names
+	names := make([]string, len(children))
+	for i, c := range children {
+		names[i] = c.Name()
+	}
+
+	// Should have full Joliet names, not 8.3 truncated
+	assert.Contains(t, names, "Long Filename With Spaces.txt")
+	assert.Contains(t, names, "short.txt")
+	assert.Contains(t, names, "subdir")
+
+	// Verify subdirectory traversal works with Joliet
+	for _, child := range children {
+		if child.Name() == "subdir" {
+			assert.True(t, child.IsDir())
+			assert.True(t, child.joliet, "child dir should inherit joliet flag")
+
+			subChildren, err := child.GetChildren()
+			assert.NoError(t, err)
+			assert.Len(t, subChildren, 1)
+			assert.Equal(t, "Another Long Name.dat", subChildren[0].Name())
+			assert.True(t, subChildren[0].joliet)
+
+			// Verify file content is readable
+			data, err := io.ReadAll(subChildren[0].Reader())
+			assert.NoError(t, err)
+			assert.Equal(t, "Nested file\n", string(data))
+		}
+	}
+}
+
 func TestImageReaderSUSP(t *testing.T) {
 	f, err := os.Open("fixtures/test_rockridge.iso")
 	assert.NoError(t, err)
