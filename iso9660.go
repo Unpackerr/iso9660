@@ -387,9 +387,10 @@ func (bvd *BootVolumeDescriptorBody) UnmarshalBinary(data []byte) error {
 }
 
 type volumeDescriptor struct {
-	Header  volumeDescriptorHeader
-	Boot    *BootVolumeDescriptorBody
-	Primary *PrimaryVolumeDescriptorBody
+	Header           volumeDescriptorHeader
+	Boot             *BootVolumeDescriptorBody
+	Primary          *PrimaryVolumeDescriptorBody
+	EscapeSequences  []byte
 }
 
 var _ encoding.BinaryUnmarshaler = &volumeDescriptor{}
@@ -397,6 +398,17 @@ var _ encoding.BinaryMarshaler = &volumeDescriptor{}
 
 func (vd volumeDescriptor) Type() byte {
 	return vd.Header.Type
+}
+
+// isJoliet returns true if this is a Joliet supplementary volume descriptor.
+// Joliet is identified by escape sequences %/@, %/C, or %/E in bytes 88-120.
+func (vd volumeDescriptor) isJoliet() bool {
+	if vd.Header.Type != volumeTypeSupplementary || len(vd.EscapeSequences) == 0 {
+		return false
+	}
+
+	seq := string(vd.EscapeSequences)
+	return strings.Contains(seq, "%/@") || strings.Contains(seq, "%/C") || strings.Contains(seq, "%/E")
 }
 
 // UnmarshalBinary decodes a volumeDescriptor from binary form
@@ -426,6 +438,10 @@ func (vd *volumeDescriptor) UnmarshalBinary(data []byte) error {
 		return errors.New("partition volumes are not yet supported")
 	case volumeTypePrimary, volumeTypeSupplementary:
 		vd.Primary = &PrimaryVolumeDescriptorBody{}
+		if vd.Header.Type == volumeTypeSupplementary {
+			vd.EscapeSequences = make([]byte, 32)
+			copy(vd.EscapeSequences, data[88:120])
+		}
 		return vd.Primary.UnmarshalBinary(data)
 	case volumeTypeTerminator:
 		return nil
